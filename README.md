@@ -143,6 +143,71 @@ conda run -n digital python scripts/tune_granite_bias.py \
 
 위 명령은 `model/granite-311m-fold0/logit_bias.json`을 생성한다. `scripts/infer_granite_router.py`와 제출용 `packaging/granite_submit_script.py`는 이 파일이 있으면 자동으로 logits에 bias를 더한다.
 
+## Encoder Model Sweep
+
+Granite가 E5-small보다 크게 앞선 뒤에는 같은 입력 직렬화와 GroupKFold 조건에서 더 강한 multilingual encoder를 비교한다. 우선 후보는 `BAAI/bge-m3`다. 크기는 Granite와 비슷하지만 XLM-R 계열이라 inductive bias가 달라, Granite 점수가 단순 모델 크기 효과인지 ModernBERT/Granite 계열 효과인지 가르는 데 유용하다.
+
+구성:
+
+- `scripts/train_encoder_router.py`: 임의 Hugging Face encoder sequence classifier fine-tuning.
+- `scripts/infer_encoder_router.py`: fine-tuned encoder 모델 추론.
+- `scripts/tune_encoder_bias.py`: validation logits 기반 class logit bias tuning.
+- `packaging/encoder_submit_script.py`: 제출 zip에 들어갈 generic encoder `script.py` 템플릿. zip 안 모델 경로는 `model/encoder-router`로 맞춘다.
+
+BGE-M3 학습:
+
+```bash
+conda run -n digital python scripts/train_encoder_router.py \
+  --data-dir ../data \
+  --model-name BAAI/bge-m3 \
+  --output-dir ./model/bge-m3-router-fold0 \
+  --fold 0 \
+  --n-splits 5 \
+  --max-length 512 \
+  --max-history-events 12 \
+  --epochs 3 \
+  --batch-size 16 \
+  --eval-batch-size 32 \
+  --grad-accum 8 \
+  --learning-rate 2e-5 \
+  --weight-decay 0.01 \
+  --warmup-ratio 0.06 \
+  --seed 42
+```
+
+추론 및 bias tuning:
+
+```bash
+conda run -n digital python scripts/infer_encoder_router.py \
+  --data-dir ../data \
+  --model-dir ./model/bge-m3-router-fold0 \
+  --output-path ./output/submission_bge_m3.csv \
+  --batch-size 32
+
+conda run -n digital python scripts/tune_encoder_bias.py \
+  --data-dir ../data \
+  --model-dir ./model/bge-m3-router-fold0 \
+  --fold 0 \
+  --n-splits 5 \
+  --max-length 512 \
+  --max-history-events 12 \
+  --batch-size 32
+```
+
+다음 후보:
+
+- `Alibaba-NLP/gte-multilingual-base`: multilingual retrieval encoder. 필요하면 `--trust-remote-code`를 켠다.
+- `FacebookAI/xlm-roberta-large`: 강한 범용 multilingual baseline. 추론 시간과 zip 크기를 먼저 확인한다.
+
+Screening 결과:
+
+- `FacebookAI/xlm-roberta-large`, 1 epoch: `0.58929`, bias tuning 후 `0.61100`.
+- `answerdotai/ModernBERT-base`, 1 epoch: `0.32973`.
+- `intfloat/multilingual-e5-large`, 1 epoch: `0.57579`, bias tuning 후 `0.59895`.
+- `Alibaba-NLP/gte-multilingual-base`, 1 epoch: `0.56063`, bias tuning 후 `0.60119`.
+
+모두 Granite/BGE-M3보다 낮아서 제출 후보로 패키징하지 않는다.
+
 ## Packaging Submit Zip
 
 대회 제출은 prediction CSV가 아니라 `script.py`, `requirements.txt`, 학습된 모델을 포함한 zip이다.
@@ -174,6 +239,18 @@ conda run -n digital python script.py
 
 ```text
 output/submission.csv
+```
+
+Generic encoder 제출 zip 생성:
+
+```bash
+rm -rf /tmp/encoder_submit
+mkdir -p /tmp/encoder_submit/model submissions
+cp packaging/encoder_submit_script.py /tmp/encoder_submit/script.py
+cp requirements-granite.txt /tmp/encoder_submit/requirements.txt
+cp -a model/bge-m3-router-fold0 /tmp/encoder_submit/model/encoder-router
+cd /tmp/encoder_submit
+zip -qr /home/seongmin/research/projects/digital/agent-action-prediction/submissions/submit_bge-m3-fold0_bias_f1-0.71227_20260702.zip .
 ```
 
 ## Expected Data Layout
