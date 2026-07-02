@@ -13,6 +13,20 @@ AI 코딩 에이전트 세션 상태에서 다음 행동(action)을 14개 클래
 - `scripts/baseline_train.py`: `current_prompt`만 사용해 TF-IDF + Logistic Regression 모델을 학습하고 `model/tfidf_logreg.pkl`로 저장한다.
 - `scripts/baseline_inference.py`: 저장된 모델을 불러와 `data/test.jsonl`을 예측하고 `output/submission.csv`를 생성한다.
 
+실행:
+
+```bash
+python scripts/baseline_train.py
+python scripts/baseline_inference.py
+```
+
+산출물:
+
+```text
+model/tfidf_logreg.pkl
+output/submission.csv
+```
+
 ## Transformer Experiment
 
 `intfloat/multilingual-e5-small` 기반 action router 실험을 추가했다. IBM Granite embedding 모델은 제외하고, 먼저 다국어 E5-small을 sequence classification으로 fine-tuning하는 구성이다.
@@ -63,6 +77,105 @@ python scripts/infer_e5_router.py \
 
 학습된 모델 디렉터리는 제출 시 `model/e5-small-router` 형태로 포함하고, 평가 서버에서는 인터넷 없이 로컬 모델만 로드해야 한다.
 
+## Granite Experiment
+
+현재 주력 모델은 `ibm-granite/granite-embedding-311m-multilingual-r2` 기반 sequence classifier다.
+
+구성:
+
+- `scripts/train_granite_router.py`: Granite fine-tuning.
+- `scripts/infer_granite_router.py`: Granite 모델 추론.
+- `scripts/tune_granite_bias.py`: validation logits 기반 class logit bias tuning.
+- `packaging/granite_submit_script.py`: 제출 zip에 들어갈 self-contained `script.py` 템플릿.
+- `requirements-granite.txt`: Granite 제출/학습용 의존성. `transformers==4.48.3` 필요.
+
+입력 직렬화:
+
+```text
+[META] tier=... pref=... turn=... budget=... lang=... ci=... git=... open=...
+[HIST] U: ... | A[action] args -> result | ...
+[CUR] current_prompt
+```
+
+학습:
+
+```bash
+conda run -n digital python scripts/train_granite_router.py \
+  --data-dir ../data \
+  --model-name ibm-granite/granite-embedding-311m-multilingual-r2 \
+  --output-dir ./model/granite-311m-fold0 \
+  --fold 0 \
+  --n-splits 5 \
+  --max-length 512 \
+  --max-history-events 12 \
+  --epochs 3 \
+  --batch-size 32 \
+  --eval-batch-size 64 \
+  --grad-accum 4 \
+  --learning-rate 2e-5 \
+  --weight-decay 0.01 \
+  --warmup-ratio 0.06 \
+  --seed 42
+```
+
+추론:
+
+```bash
+conda run -n digital python scripts/infer_granite_router.py \
+  --data-dir ../data \
+  --model-dir ./model/granite-311m-fold0 \
+  --output-path ./output/submission_granite.csv \
+  --batch-size 64
+```
+
+Logit bias tuning:
+
+```bash
+conda run -n digital python scripts/tune_granite_bias.py \
+  --data-dir ../data \
+  --model-dir ./model/granite-311m-fold0 \
+  --fold 0 \
+  --n-splits 5 \
+  --max-length 512 \
+  --max-history-events 12 \
+  --batch-size 64
+```
+
+위 명령은 `model/granite-311m-fold0/logit_bias.json`을 생성한다. `scripts/infer_granite_router.py`와 제출용 `packaging/granite_submit_script.py`는 이 파일이 있으면 자동으로 logits에 bias를 더한다.
+
+## Packaging Submit Zip
+
+대회 제출은 prediction CSV가 아니라 `script.py`, `requirements.txt`, 학습된 모델을 포함한 zip이다.
+
+Granite 제출 zip 생성:
+
+```bash
+rm -rf /tmp/granite_submit
+mkdir -p /tmp/granite_submit/model submissions
+cp packaging/granite_submit_script.py /tmp/granite_submit/script.py
+cp requirements-granite.txt /tmp/granite_submit/requirements.txt
+cp -a model/granite-311m-fold0 /tmp/granite_submit/model/
+cd /tmp/granite_submit
+zip -qr /home/seongmin/research/projects/digital/agent-action-prediction/submissions/submit_granite-311m-fold0_bias.zip .
+```
+
+패키지 검증:
+
+```bash
+rm -rf /tmp/granite_submit_test
+mkdir -p /tmp/granite_submit_test
+unzip -q /home/seongmin/research/projects/digital/agent-action-prediction/submissions/submit_granite-311m-fold0_bias.zip -d /tmp/granite_submit_test
+ln -s /home/seongmin/research/projects/digital/data /tmp/granite_submit_test/data
+cd /tmp/granite_submit_test
+conda run -n digital python script.py
+```
+
+정상 실행되면 아래 파일이 생성된다.
+
+```text
+output/submission.csv
+```
+
 ## Expected Data Layout
 
 실행 시 데이터는 저장소 루트 기준 아래 위치에 둔다. 데이터 파일은 용량과 대회 규정상 git에 포함하지 않는다.
@@ -81,14 +194,4 @@ data/
 
 ## Run
 
-```bash
-python scripts/baseline_train.py
-python scripts/baseline_inference.py
-```
-
-학습 결과와 추론 결과는 각각 아래에 생성된다.
-
-```text
-model/tfidf_logreg.pkl
-output/submission.csv
-```
+주요 실행 명령은 위의 Baseline, Transformer Experiment, Granite Experiment, Packaging Submit Zip 섹션을 참고한다.
