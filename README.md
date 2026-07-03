@@ -4,7 +4,7 @@ AI 코딩 에이전트 세션 상태에서 다음 행동(action)을 14개 클래
 
 ## Experiments
 
-시도한 모델과 성능 기록은 `docs/experiments.md`에 정리한다.
+시도한 모델과 성능 기록은 `docs/experiments.md`에 정리한다. 단순 모델/파라미터 변경 이후의 압축, LoRA, pruning, ensemble 후보는 `docs/next_experiments.md`에 정리한다.
 
 ## Baseline
 
@@ -251,6 +251,32 @@ cp requirements-granite.txt /tmp/encoder_submit/requirements.txt
 cp -a model/bge-m3-router-fold0 /tmp/encoder_submit/model/encoder-router
 cd /tmp/encoder_submit
 zip -qr /home/seongmin/research/projects/digital/agent-action-prediction/submissions/submit_bge-m3-fold0_bias_f1-0.71227_20260702.zip .
+```
+
+Granite h16/l512 fold0+fold1 앙상블 추론:
+
+```bash
+conda run -n digital python scripts/infer_granite_ensemble.py \
+  --data-dir ../data \
+  --model-dirs \
+    ./model/granite-311m-fold0-h16-l512 \
+    ./model/granite-311m-fold1-h16-l512 \
+  --output-path ./output/submission_granite_h16_fold01_ensemble.csv \
+  --batch-size 64 \
+  --max-history-events 16
+```
+
+앙상블 제출 zip 생성:
+
+```bash
+rm -rf /tmp/granite_ensemble_submit
+mkdir -p /tmp/granite_ensemble_submit/model
+cp packaging/granite_ensemble_submit_script.py /tmp/granite_ensemble_submit/script.py
+cp requirements-granite.txt /tmp/granite_ensemble_submit/requirements.txt
+cp -a model/granite-311m-fold0-h16-l512 /tmp/granite_ensemble_submit/model/
+cp -a model/granite-311m-fold1-h16-l512 /tmp/granite_ensemble_submit/model/
+cd /tmp/granite_ensemble_submit
+zip -qr /home/seongmin/research/projects/digital/agent-action-prediction/submissions/submit_granite_h16_fold01_ensemble.zip .
 ```
 
 ## Expected Data Layout

@@ -69,3 +69,4 @@ Summary:
 - Granite 5 epoch with lower lr (`1e-5`) dropped to `0.71821` raw / `0.72698` tuned, so the original `3 epochs`, `2e-5` schedule remains better.
 - History sweep: h16/l512 is the best fold0 setting so far (`0.73906` tuned). h20/l768 improves over original but not h16, and h8 is clearly worse.
 - Fold1 h16/l512 is strong (`0.75159` tuned on fold1 validation), so a 2-fold h16/l512 ensemble is the next submission candidate to test against runtime/zip limits.
+- Broader next-step plan is in `docs/next_experiments.md`. Priority is h16 fold0/fold1 ensemble first, dynamic INT8 quantization probe second, then distillation/LoRA for cheaper extra folds. Pruning is lower priority unless structured layer dropping is paired with distillation.
