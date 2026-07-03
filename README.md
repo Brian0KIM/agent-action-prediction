@@ -279,6 +279,38 @@ cd /tmp/granite_ensemble_submit
 zip -qr /home/seongmin/research/projects/digital/agent-action-prediction/submissions/submit_granite_h16_fold01_ensemble.zip .
 ```
 
+앙상블 GPU throughput 측정:
+
+```bash
+conda run -n digital python scripts/benchmark_granite_ensemble.py \
+  --data-dir ../data \
+  --model-dirs \
+    ./model/granite-311m-fold0-h16-l512 \
+    ./model/granite-311m-fold1-h16-l512 \
+  --max-history-events 16 \
+  --limit 3000 \
+  --batch-size 64
+```
+
+Granite LoRA smoke/full 학습:
+
+```bash
+conda run -n digital python scripts/train_granite_lora_router.py \
+  --data-dir ../data \
+  --model-name ibm-granite/granite-embedding-311m-multilingual-r2 \
+  --output-dir ./model/granite-311m-lora-fold2 \
+  --fold 2 \
+  --max-history-events 16 \
+  --epochs 3 \
+  --batch-size 32 \
+  --eval-batch-size 64 \
+  --grad-accum 4 \
+  --learning-rate 5e-4 \
+  --lora-r 16 \
+  --lora-alpha 32 \
+  --save-merged
+```
+
 ## Expected Data Layout
 
 실행 시 데이터는 저장소 루트 기준 아래 위치에 둔다. 데이터 파일은 용량과 대회 규정상 git에 포함하지 않는다.
