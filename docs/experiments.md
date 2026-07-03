@@ -38,6 +38,8 @@ AI 코딩 에이전트 다음 행동 예측 실험 결과 기록이다.
 | 2026-07-02 | `Alibaba-NLP/gte-multilingual-base` fine-tuning + logit bias tuning | same as Granite | GroupKFold 5, fold0, session id group | 0.60119 | - | `model/gte-multilingual-base-router-fold0-e1/logit_bias.json` | Similar to E5-large, not a submission candidate |
 | 2026-07-03 | Granite h16/l512 fold0+fold1 logit ensemble packaging/throughput | same as h16 Granite | GPU throughput benchmark on 3,000 fold0 validation rows | - | - | `submissions/submit_granite_h16_fold01_ensemble_20260703.zip` | Zip `992M`; 2-model inference estimated `164s` for 30,000 rows on GPU |
 | 2026-07-03 | Granite LoRA integration smoke, r16 alpha32 targets `Wqkv,Wo,Wi` | same as h16 Granite | 32 train / 32 val smoke only | 0.23114 | - | `model/granite-lora-smoke` | PEFT integration, adapter save, merged full-model save, and inference load all verified. Score is not meaningful |
+| 2026-07-03 | Granite LoRA r16 alpha32, 1 epoch + logit bias | same as h16 Granite | GroupKFold 5, fold0, session id group | 0.70433 | - | `model/granite-311m-lora-fold0-e1/merged/logit_bias.json` | 1 epoch is below BGE-M3 tuned and not enough |
+| 2026-07-03 | Granite LoRA r16 alpha32, 3 epochs + logit bias, fp16 merged | same as h16 Granite | GroupKFold 5, fold0, session id group | 0.75337 | - | `submissions/submit_granite_lora_fold0_e3_fp16_bias_f1-0.75337_20260703.zip` | New best fold0 local. Zip `491M`; fp32 tuned was `0.75367`, fp16 tuned `0.75337` |
 
 ## Current Best
 
@@ -74,3 +76,4 @@ Summary:
 - Broader next-step plan is in `docs/next_experiments.md`. Priority is h16 fold0/fold1 ensemble first, dynamic INT8 quantization probe second, then distillation/LoRA for cheaper extra folds. Pruning is lower priority unless structured layer dropping is paired with distillation.
 - h16 fold0/fold1 ensemble fits the 10 minute runtime constraint by throughput estimate (`~164s` for 30k rows on GPU), but the zip is large (`992M`). If the competition accepts ~1GB submissions, this is the next public LB candidate.
 - LoRA is now wired through `scripts/train_granite_lora_router.py`. Smoke run confirmed `1.2587%` trainable parameters and successful `merge_and_unload()` output, so full fold2/fold3 LoRA training is feasible.
+- LoRA 3 epoch fold0 beat the previous fold0 local best after bias tuning (`0.75337` fp16 merged vs `0.73906` full fine-tune h16). This is the strongest next Public LB candidate before adding more folds.
