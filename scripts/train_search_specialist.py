@@ -166,6 +166,7 @@ def main():
         local_files_only=args.local_files_only,
         trust_remote_code=args.trust_remote_code,
         attn_implementation=args.attn_implementation,
+        ignore_mismatched_sizes=True,
     )
     model.to(device)
 
