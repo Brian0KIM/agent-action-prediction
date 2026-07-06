@@ -42,6 +42,8 @@ AI 코딩 에이전트 다음 행동 예측 실험 결과 기록이다.
 | 2026-07-03 | Granite LoRA r16 alpha32, 3 epochs + logit bias, fp16 merged | same as h16 Granite | GroupKFold 5, fold0, session id group | 0.75337 | - | `submissions/submit_granite_lora_fold0_e3_fp16_bias_f1-0.75337_20260703.zip` | New best fold0 local. Zip `491M`; fp32 tuned was `0.75367`, fp16 tuned `0.75337` |
 | 2026-07-03 | Granite LoRA r16 alpha32, 3 epochs + logit bias, fp16 merged | same as h16 Granite | GroupKFold 5, fold1, session id group | 0.75613 | - | `submissions/submit_granite_lora_fold1_e3_fp16_bias_f1-0.75613_20260703.zip` | New best fold1 local. Zip `491M`; fp32 tuned was `0.75664`, fp16 tuned `0.75613` |
 | 2026-07-03 | Granite LoRA fold0+fold1 fp16 logit ensemble | same as h16 Granite | GPU throughput benchmark on 3,000 fold0 validation rows | - | - | `submissions/submit_granite_lora_fold01_ensemble_fp16_20260703.zip` | Zip `982M`; 2-model inference estimated `166.6s` for 30,000 rows on GPU |
+| 2026-07-06 | Granite LoRA fold0, `open=basename,comma` + logit bias | `[META]` open files as basenames only, comma-separated | GroupKFold 5, fold0, session id group | 0.74834 | - | `model/granite-311m-lora-fold0-e3-open-basename/merged/logit_bias.json` | Directory removed but lower than baseline fold0 LoRA |
+| 2026-07-06 | Granite LoRA fold0, `openfiles=basename basename` + logit bias | `[META]` open files as basenames only, space-separated, `openfiles=` field | GroupKFold 5, fold0, session id group | 0.75064 | - | `model/granite-311m-lora-fold0-e3-openfiles-basename-space/merged/logit_bias.json` | Matches proposed rendering more closely; improves over comma variant but still below baseline fold0 LoRA `0.75337` |
 
 ## Current Best
 

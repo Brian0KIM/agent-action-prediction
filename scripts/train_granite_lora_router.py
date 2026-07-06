@@ -49,7 +49,7 @@ def load_labels(path):
         return {row["id"]: row["action"] for row in csv.DictReader(f)}
 
 
-def build_data(data_dir, max_history_events):
+def build_data(data_dir, max_history_events, open_files_mode):
     samples = load_jsonl(Path(data_dir) / "train.jsonl")
     labels = load_labels(Path(data_dir) / "train_labels.csv")
     texts = []
@@ -57,7 +57,13 @@ def build_data(data_dir, max_history_events):
     groups = []
     for sample in samples:
         sample_id = sample["id"]
-        texts.append(render_granite_sample(sample, max_history_events=max_history_events))
+        texts.append(
+            render_granite_sample(
+                sample,
+                max_history_events=max_history_events,
+                open_files_mode=open_files_mode,
+            )
+        )
         y.append(LABEL2ID[labels[sample_id]])
         groups.append(session_group(sample_id))
     return np.array(texts, dtype=object), np.array(y, dtype=np.int64), np.array(groups, dtype=object)
@@ -100,6 +106,7 @@ def main():
     parser.add_argument("--n-splits", type=int, default=5)
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--max-history-events", type=int, default=16)
+    parser.add_argument("--open-files-mode", choices=["count", "basename", "basename_space", "ext", "path"], default="count")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--eval-batch-size", type=int, default=64)
@@ -131,7 +138,7 @@ def main():
 
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    texts, y, groups = build_data(args.data_dir, args.max_history_events)
+    texts, y, groups = build_data(args.data_dir, args.max_history_events, args.open_files_mode)
 
     splitter = GroupKFold(n_splits=args.n_splits)
     splits = list(splitter.split(texts, y, groups))
@@ -237,6 +244,7 @@ def main():
                         "n_splits": args.n_splits,
                         "max_length": args.max_length,
                         "max_history_events": args.max_history_events,
+                        "open_files_mode": args.open_files_mode,
                         "lora_r": args.lora_r,
                         "lora_alpha": args.lora_alpha,
                         "lora_dropout": args.lora_dropout,

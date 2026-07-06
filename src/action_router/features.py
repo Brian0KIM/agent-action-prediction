@@ -1,4 +1,5 @@
 import json
+from pathlib import PurePath
 
 
 def _safe_text(value):
@@ -37,6 +38,27 @@ def _elapsed_bucket(seconds):
     if seconds < 900:
         return "mid"
     return "late"
+
+
+def _open_files_value(open_files, mode="count"):
+    if mode == "count":
+        return str(len(open_files))
+    if mode == "basename":
+        names = [PurePath(_safe_text(path)).name for path in open_files]
+        return ",".join(name for name in names if name) or "-"
+    if mode == "basename_space":
+        names = [PurePath(_safe_text(path)).name for path in open_files]
+        return " ".join(name for name in names if name) or "-"
+    if mode == "ext":
+        exts = []
+        for path in open_files:
+            suffix = PurePath(_safe_text(path)).suffix.lstrip(".")
+            if suffix:
+                exts.append(suffix)
+        return ",".join(exts) or "-"
+    if mode == "path":
+        return ",".join(_safe_text(path) for path in open_files) or "-"
+    raise ValueError(f"unknown open_files mode: {mode}")
 
 
 def render_sample(sample, max_history=8):
@@ -81,7 +103,7 @@ def render_sample(sample, max_history=8):
     return "\n".join(parts)
 
 
-def render_granite_sample(sample, max_history_events=12):
+def render_granite_sample(sample, max_history_events=12, open_files_mode="count"):
     """Compact serialization used for the granite reproduction run.
 
     `max_history_events=12` corresponds to the last six user/action pairs in
@@ -108,7 +130,11 @@ def render_granite_sample(sample, max_history_events=12):
             f"lang={main_lang}",
             f"ci={_safe_text(workspace.get('last_ci_status'))}",
             f"git={'dirty' if workspace.get('git_dirty') else 'clean'}",
-            f"open={len(open_files)}",
+            (
+                f"openfiles={_open_files_value(open_files, open_files_mode)}"
+                if open_files_mode == "basename_space"
+                else f"open={_open_files_value(open_files, open_files_mode)}"
+            ),
             f"loc={_safe_text(workspace.get('loc'))}",
         ]
     )
