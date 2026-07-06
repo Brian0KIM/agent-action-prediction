@@ -8,17 +8,23 @@ from collections import Counter
 from pathlib import Path
 
 import numpy as np
-from sklearn.metrics import f1_score
-from sklearn.model_selection import GroupKFold
+from sklearn.metrics import classification_report, f1_score
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
-from action_router.constants import ACTION_CLASSES, ID2LABEL, LABEL2ID
 from action_router.features import render_granite_sample, session_group
+from action_router.split import split_train_val
 
 
-class ActionDataset:
+os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
+
+SEARCH_CLASSES = ["read_file", "grep_search", "list_directory", "glob_pattern"]
+SEARCH_LABEL2ID = {label: idx for idx, label in enumerate(SEARCH_CLASSES)}
+SEARCH_ID2LABEL = {idx: label for label, idx in SEARCH_LABEL2ID.items()}
+
+
+class SearchDataset:
     def __init__(self, texts, labels, tokenizer, max_length):
         self.texts = texts
         self.labels = labels
@@ -52,109 +58,76 @@ def load_labels(path):
 def build_data(data_dir, max_history_events):
     samples = load_jsonl(Path(data_dir) / "train.jsonl")
     labels = load_labels(Path(data_dir) / "train_labels.csv")
-    ids = []
     texts = []
     y = []
     groups = []
     for sample in samples:
-        sample_id = sample["id"]
-        ids.append(sample_id)
+        action = labels[sample["id"]]
+        if action not in SEARCH_LABEL2ID:
+            continue
         texts.append(render_granite_sample(sample, max_history_events=max_history_events))
-        y.append(LABEL2ID[labels[sample_id]])
-        groups.append(session_group(sample_id))
-    return (
-        np.array(ids, dtype=object),
-        np.array(texts, dtype=object),
-        np.array(y, dtype=np.int64),
-        np.array(groups, dtype=object),
-    )
-
-
-def dump_oof(oof_path, ids, y_true, val_logits, id2label):
-    """Save OOF predictions as npz (ids, y_true, classes, logits, probs) with
-    columns reordered to ACTION_CLASSES order. Consumed by verify_int8.py,
-    blend_eval.py, eval_search_specialist.py."""
-    label2id = {id2label[i]: i for i in range(val_logits.shape[1])}
-    col_order = [label2id[name] for name in ACTION_CLASSES]
-    ordered = val_logits[:, col_order].astype(np.float32)
-    shifted = ordered - ordered.max(axis=1, keepdims=True)
-    exp = np.exp(shifted)
-    probs = (exp / exp.sum(axis=1, keepdims=True)).astype(np.float32)
-    os.makedirs(Path(oof_path).parent, exist_ok=True)
-    np.savez(
-        oof_path,
-        ids=np.array(ids, dtype=object),
-        y_true=np.asarray(y_true, dtype=np.int64),
-        classes=np.array(ACTION_CLASSES),
-        logits=ordered,
-        probs=probs,
-    )
-    print(f"saved OOF to {oof_path} shape={probs.shape}")
+        y.append(SEARCH_LABEL2ID[action])
+        groups.append(session_group(sample["id"]))
+    return np.array(texts, dtype=object), np.array(y, dtype=np.int64), np.array(groups, dtype=object)
 
 
 def class_weights(y):
     counts = Counter(int(v) for v in y)
-    weights = []
     total = len(y)
-    n_classes = len(ACTION_CLASSES)
-    for label_id in range(n_classes):
-        weights.append(total / (n_classes * max(counts[label_id], 1)))
-    weights = np.array(weights, dtype=np.float32)
+    weights = []
+    for label_id in range(len(SEARCH_CLASSES)):
+        weights.append((total / max(counts[label_id], 1)) ** 0.5)
+    weights = np.asarray(weights, dtype=np.float32)
     return weights / weights.mean()
 
 
-def evaluate(model, loader, device, use_fp16, return_logits=False):
+def evaluate(model, loader, device, use_amp, amp_dtype):
     import torch
 
     model.eval()
     preds = []
     gold = []
-    logit_chunks = []
     with torch.no_grad():
         for batch in loader:
             labels = batch.pop("labels").numpy().tolist()
-            batch = {k: v.to(device) for k, v in batch.items()}
-            with torch.amp.autocast("cuda", enabled=use_fp16 and device.type == "cuda"):
+            batch = {key: value.to(device) for key, value in batch.items()}
+            with torch.amp.autocast("cuda", enabled=use_amp and device.type == "cuda", dtype=amp_dtype):
                 logits = model(**batch).logits
-            logits = logits.float()
-            if return_logits:
-                logit_chunks.append(logits.cpu().numpy())
             preds.extend(torch.argmax(logits, dim=-1).cpu().numpy().tolist())
             gold.extend(labels)
-    macro = f1_score(gold, preds, labels=list(range(len(ACTION_CLASSES))), average="macro", zero_division=0)
-    if return_logits:
-        return macro, np.concatenate(logit_chunks, axis=0), np.asarray(gold, dtype=np.int64)
-    return macro
+    macro_f1 = f1_score(gold, preds, labels=list(range(len(SEARCH_CLASSES))), average="macro", zero_division=0)
+    print(classification_report(gold, preds, target_names=SEARCH_CLASSES, digits=4, zero_division=0))
+    return macro_f1
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default="./data")
     parser.add_argument("--model-name", default="ibm-granite/granite-embedding-311m-multilingual-r2")
-    parser.add_argument("--output-dir", default="./model/granite-311m-fold0")
-    parser.add_argument("--split-mode", choices=["group", "all"], default="group",
-                        help="'group' = GroupKFold fold (has val); 'all' = train on 100% of data (no val).")
+    parser.add_argument("--output-dir", default="./model/search-specialist-fold0")
+    parser.add_argument("--split-mode", choices=["group", "stratified", "all"], default="group")
     parser.add_argument("--fold", type=int, default=0)
     parser.add_argument("--n-splits", type=int, default=5)
-    parser.add_argument("--eval-only", action="store_true",
-                        help="Load --output-dir, evaluate the fold val split, dump OOF, exit (no training).")
-    parser.add_argument("--oof-path", default="",
-                        help="If set, dump OOF npz (ids/y_true/classes/logits/probs) for the val split.")
+    parser.add_argument("--val-size", type=float, default=0.2)
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--max-history-events", type=int, default=12)
     parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--eval-batch-size", type=int, default=64)
     parser.add_argument("--grad-accum", type=int, default=4)
-    parser.add_argument("--learning-rate", type=float, default=2e-5)
+    parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--warmup-ratio", type=float, default=0.06)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--fp16", action="store_true", default=True)
-    parser.add_argument("--save-fp16", action="store_true", default=True)
+    parser.add_argument("--fp16", action="store_true", default=False)
+    parser.add_argument("--bf16", action="store_true", default=False)
+    parser.add_argument("--local-files-only", action="store_true")
+    parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--attn-implementation", default="eager")
     args = parser.parse_args()
 
     import torch
+    import torch._dynamo
     from torch.utils.data import DataLoader
     from transformers import (
         AutoModelForSequenceClassification,
@@ -164,57 +137,41 @@ def main():
         set_seed,
     )
 
+    torch._dynamo.config.suppress_errors = True
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ids, texts, y, groups = build_data(args.data_dir, args.max_history_events)
-
-    # ---- split ----
-    if args.split_mode == "all":
-        has_val = False
-        train_texts, y_train = texts.tolist(), y
-        val_texts, y_val, val_ids = [], np.array([], dtype=np.int64), []
-        print(f"train={len(train_texts)} (split-mode=all, no val)")
-    else:
-        splitter = GroupKFold(n_splits=args.n_splits)
-        splits = list(splitter.split(texts, y, groups))
-        train_idx, val_idx = splits[args.fold]
-        train_texts, val_texts = texts[train_idx].tolist(), texts[val_idx].tolist()
-        y_train, y_val = y[train_idx], y[val_idx]
-        val_ids = ids[val_idx].tolist()
-        has_val = True
-        print(f"train={len(train_texts)} val={len(val_texts)} fold={args.fold}/{args.n_splits}")
-
-    collator = None  # set after tokenizer
-
-    # eval-only: load the saved model, evaluate val split, dump OOF, exit.
-    if args.eval_only:
-        if not has_val:
-            raise SystemExit("--eval-only needs a val split (use --split-mode group)")
-        tokenizer = AutoTokenizer.from_pretrained(args.output_dir, use_fast=True, local_files_only=True)
-        model = AutoModelForSequenceClassification.from_pretrained(args.output_dir, local_files_only=True).to(device).eval()
-        collator = DataCollatorWithPadding(tokenizer=tokenizer)
-        val_loader = DataLoader(
-            ActionDataset(val_texts, y_val, tokenizer, args.max_length),
-            batch_size=args.eval_batch_size, shuffle=False, collate_fn=collator, num_workers=2,
+    texts, y, groups = build_data(args.data_dir, args.max_history_events)
+    train_texts, val_texts, y_train, y_val, has_val, _, _ = split_train_val(
+        texts, y, groups, args.split_mode, args.fold, args.n_splits, args.val_size, args.seed
+    )
+    if has_val:
+        print(
+            f"search_train={len(train_texts)} search_val={len(val_texts)} "
+            f"split={args.split_mode} fold={args.fold}/{args.n_splits}"
         )
-        macro, val_logits, val_gold = evaluate(model, val_loader, device, args.fp16, return_logits=True)
-        print(f"[eval-only] val_macro_f1={macro:.5f}")
-        if args.oof_path:
-            dump_oof(args.oof_path, val_ids, val_gold, val_logits, model.config.id2label)
-        return
+    else:
+        print(f"search_train={len(train_texts)} search_val=0 split=all")
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name,
+        use_fast=True,
+        local_files_only=args.local_files_only,
+        trust_remote_code=args.trust_remote_code,
+    )
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_name,
-        num_labels=len(ACTION_CLASSES),
-        id2label=ID2LABEL,
-        label2id=LABEL2ID,
+        num_labels=len(SEARCH_CLASSES),
+        id2label=SEARCH_ID2LABEL,
+        label2id=SEARCH_LABEL2ID,
+        local_files_only=args.local_files_only,
+        trust_remote_code=args.trust_remote_code,
+        attn_implementation=args.attn_implementation,
     )
     model.to(device)
 
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
     train_loader = DataLoader(
-        ActionDataset(train_texts, y_train, tokenizer, args.max_length),
+        SearchDataset(train_texts, y_train, tokenizer, args.max_length),
         batch_size=args.batch_size,
         shuffle=True,
         collate_fn=collator,
@@ -223,7 +180,7 @@ def main():
     val_loader = None
     if has_val:
         val_loader = DataLoader(
-            ActionDataset(val_texts, y_val, tokenizer, args.max_length),
+            SearchDataset(val_texts, y_val, tokenizer, args.max_length),
             batch_size=args.eval_batch_size,
             shuffle=False,
             collate_fn=collator,
@@ -241,6 +198,8 @@ def main():
         num_training_steps=total_steps,
     )
     scaler = torch.amp.GradScaler("cuda", enabled=args.fp16 and device.type == "cuda")
+    use_amp = (args.fp16 or args.bf16) and device.type == "cuda"
+    amp_dtype = torch.bfloat16 if args.bf16 else torch.float16
 
     best_f1 = -1.0
     os.makedirs(args.output_dir, exist_ok=True)
@@ -252,8 +211,8 @@ def main():
         update_step = 0
         for step, batch in enumerate(train_loader, start=1):
             labels = batch.pop("labels").to(device)
-            batch = {k: v.to(device) for k, v in batch.items()}
-            with torch.amp.autocast("cuda", enabled=args.fp16 and device.type == "cuda"):
+            batch = {key: value.to(device) for key, value in batch.items()}
+            with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
                 logits = model(**batch).logits
                 loss = criterion(logits, labels) / args.grad_accum
             scaler.scale(loss).backward()
@@ -275,16 +234,15 @@ def main():
 
         train_loss = running_loss / len(train_loader)
         should_save = False
-        val_logits = val_gold = None
         if has_val:
-            macro_f1, val_logits, val_gold = evaluate(model, val_loader, device, args.fp16, return_logits=True)
-            print(f"epoch={epoch} val_macro_f1={macro_f1:.5f}")
+            macro_f1 = evaluate(model, val_loader, device, use_amp, amp_dtype)
+            print(f"epoch={epoch} val_search_macro_f1={macro_f1:.5f}")
             if macro_f1 > best_f1:
                 best_f1 = macro_f1
                 should_save = True
         else:
             print(f"epoch={epoch} train_loss={train_loss:.4f}")
-            should_save = True  # no val -> keep latest each epoch
+            should_save = True
 
         if should_save:
             model.save_pretrained(args.output_dir)
@@ -294,28 +252,20 @@ def main():
                 "split_mode": args.split_mode,
                 "max_length": args.max_length,
                 "max_history_events": args.max_history_events,
-                "action_classes": ACTION_CLASSES,
+                "search_classes": SEARCH_CLASSES,
             }
             if has_val:
-                meta["best_val_macro_f1"] = best_f1
+                meta["best_val_search_macro_f1"] = best_f1
                 meta["fold"] = args.fold
                 meta["n_splits"] = args.n_splits
             else:
                 meta["epochs"] = args.epochs
                 meta["final_epoch"] = epoch
+                meta["final_train_loss"] = train_loss
             with open(Path(args.output_dir) / "training_meta.json", "w", encoding="utf-8") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=2)
-            print(f"saved model to {args.output_dir}")
-            if has_val and args.oof_path and val_logits is not None:
-                dump_oof(args.oof_path, val_ids, val_gold, val_logits, model.config.id2label)
-
-    if args.save_fp16 and device.type == "cuda":
-        print("converting saved best model to fp16")
-        best_model = AutoModelForSequenceClassification.from_pretrained(args.output_dir)
-        best_model.half()
-        best_model.save_pretrained(args.output_dir)
+            print(f"saved search specialist to {args.output_dir}")
 
 
 if __name__ == "__main__":
     main()
-

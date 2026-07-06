@@ -138,3 +138,11 @@ def render_granite_sample(sample, max_history_events=12):
 
 def session_group(sample_id):
     return _safe_text(sample_id).split("-step_", 1)[0]
+
+
+def render_granite_text(sample, max_history_events=12, feature_mode="granite", **_):
+    """v1-only shim: verify_int8.py imports this. Only 'granite' (v1) is supported
+    in this build (v2/v3 excluded)."""
+    if feature_mode == "granite":
+        return render_granite_sample(sample, max_history_events=max_history_events)
+    raise ValueError(f"feature_mode '{feature_mode}' not available in this v1-only build")
