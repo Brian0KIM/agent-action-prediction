@@ -152,6 +152,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fp16", action="store_true", default=True)
     parser.add_argument("--save-fp16", action="store_true", default=True)
+    parser.add_argument("--attn-implementation", default="eager",
+                        help="granite-embedding (ModernBert) needs 'eager'.")
     args = parser.parse_args()
 
     import torch
@@ -191,7 +193,9 @@ def main():
         if not has_val:
             raise SystemExit("--eval-only needs a val split (use --split-mode group)")
         tokenizer = AutoTokenizer.from_pretrained(args.output_dir, use_fast=True, local_files_only=True)
-        model = AutoModelForSequenceClassification.from_pretrained(args.output_dir, local_files_only=True).to(device).eval()
+        model = AutoModelForSequenceClassification.from_pretrained(
+            args.output_dir, local_files_only=True, attn_implementation=args.attn_implementation
+        ).to(device).eval()
         collator = DataCollatorWithPadding(tokenizer=tokenizer)
         val_loader = DataLoader(
             ActionDataset(val_texts, y_val, tokenizer, args.max_length),
@@ -209,6 +213,7 @@ def main():
         num_labels=len(ACTION_CLASSES),
         id2label=ID2LABEL,
         label2id=LABEL2ID,
+        attn_implementation=args.attn_implementation,
     )
     model.to(device)
 

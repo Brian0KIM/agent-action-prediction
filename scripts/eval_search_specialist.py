@@ -71,7 +71,7 @@ def build_texts(data_dir, ids):
 
 def modernbert_kwargs(model_dir, attn):
     from transformers import AutoConfig
-    cfg = AutoConfig.from_pretrained(model_dir, local_files_only=True)
+    cfg = AutoConfig.from_pretrained(model_dir, local_files_only=True, trust_remote_code=True)
     archs = getattr(cfg, "architectures", None) or []
     is_mb = "modernbert" in (getattr(cfg, "model_type", "") or "").lower() or any(
         "modernbert" in a.lower() for a in archs
@@ -85,9 +85,9 @@ def predict_search(model_dir, texts, args, torch_dtype):
     from transformers import AutoModelForSequenceClassification, AutoTokenizer, DataCollatorWithPadding
 
     extra, is_mb = modernbert_kwargs(model_dir, args.attn_implementation)
-    tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True, trust_remote_code=True)
     model = AutoModelForSequenceClassification.from_pretrained(
-        model_dir, local_files_only=True, torch_dtype=torch_dtype, **extra
+        model_dir, local_files_only=True, torch_dtype=torch_dtype, trust_remote_code=True, **extra
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device).eval()
