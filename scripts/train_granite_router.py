@@ -49,6 +49,15 @@ def load_labels(path):
         return {row["id"]: row["action"] for row in csv.DictReader(f)}
 
 
+def load_exclude_ids(path):
+    with open(path, newline="", encoding="utf-8") as f:
+        first_line = f.readline()
+        f.seek(0)
+        if first_line.strip().split(",")[0] == "id":
+            return {row["id"] for row in csv.DictReader(f)}
+        return {line.strip() for line in f if line.strip()}
+
+
 def build_data(data_dir, max_history_events):
     samples = load_jsonl(Path(data_dir) / "train.jsonl")
     labels = load_labels(Path(data_dir) / "train_labels.csv")
@@ -140,6 +149,10 @@ def main():
                         help="Load --output-dir, evaluate the fold val split, dump OOF, exit (no training).")
     parser.add_argument("--oof-path", default="",
                         help="If set, dump OOF npz (ids/y_true/classes/logits/probs) for the val split.")
+    parser.add_argument("--exclude-ids-file", default="",
+                        help="Drop these ids from the TRAIN split only (val is untouched, so this fold's "
+                        "held-out set stays comparable to a run without this flag). Accepts a CSV with an "
+                        "'id' column (e.g. find_label_issues.py --output) or a plain one-id-per-line file.")
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--max-history-events", type=int, default=12)
     parser.add_argument("--epochs", type=int, default=3)
@@ -176,6 +189,7 @@ def main():
     # ---- split ----
     if args.split_mode == "all":
         has_val = False
+        train_ids_list = ids.tolist()
         train_texts, y_train = texts.tolist(), y
         val_texts, y_val, val_ids = [], np.array([], dtype=np.int64), []
         print(f"train={len(train_texts)} (split-mode=all, no val)")
@@ -183,11 +197,21 @@ def main():
         splitter = GroupKFold(n_splits=args.n_splits)
         splits = list(splitter.split(texts, y, groups))
         train_idx, val_idx = splits[args.fold]
+        train_ids_list = ids[train_idx].tolist()
         train_texts, val_texts = texts[train_idx].tolist(), texts[val_idx].tolist()
         y_train, y_val = y[train_idx], y[val_idx]
         val_ids = ids[val_idx].tolist()
         has_val = True
         print(f"train={len(train_texts)} val={len(val_texts)} fold={args.fold}/{args.n_splits}")
+
+    if args.exclude_ids_file:
+        exclude_ids = load_exclude_ids(args.exclude_ids_file)
+        keep = [i for i, sample_id in enumerate(train_ids_list) if sample_id not in exclude_ids]
+        dropped = len(train_texts) - len(keep)
+        train_texts = [train_texts[i] for i in keep]
+        y_train = y_train[keep]
+        print(f"--exclude-ids-file {args.exclude_ids_file}: dropped {dropped} rows from TRAIN "
+              f"({dropped / (dropped + len(keep)):.2%}), val split untouched")
 
     collator = None  # set after tokenizer
 
