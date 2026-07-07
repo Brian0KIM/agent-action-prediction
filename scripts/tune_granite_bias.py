@@ -28,21 +28,24 @@ def load_labels(path):
 def build_validation_data(data_dir, fold, n_splits, max_history_events):
     samples = load_jsonl(Path(data_dir) / "train.jsonl")
     labels = load_labels(Path(data_dir) / "train_labels.csv")
+    ids = []
     texts = []
     y = []
     groups = []
     for sample in samples:
         sample_id = sample["id"]
+        ids.append(sample_id)
         texts.append(render_granite_sample(sample, max_history_events=max_history_events))
         y.append(LABEL2ID[labels[sample_id]])
         groups.append(session_group(sample_id))
 
+    ids = np.array(ids, dtype=object)
     texts = np.array(texts, dtype=object)
     y = np.array(y, dtype=np.int64)
     groups = np.array(groups, dtype=object)
     splits = list(GroupKFold(n_splits=n_splits).split(texts, y, groups))
     _, val_idx = splits[fold]
-    return texts[val_idx].tolist(), y[val_idx]
+    return ids[val_idx].tolist(), texts[val_idx].tolist(), y[val_idx]
 
 
 def predict_logits(model_dir, texts, max_length, batch_size):
@@ -83,7 +86,7 @@ def predict_logits(model_dir, texts, max_length, batch_size):
             batch = {k: v.to(device) for k, v in batch.items()}
             out = model(**batch).logits
             logits.append(out.float().cpu().numpy())
-    return np.concatenate(logits, axis=0)
+    return np.concatenate(logits, axis=0), model.config.id2label
 
 
 def macro_f1_for_bias(logits, y, bias):
@@ -129,12 +132,34 @@ def main():
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--max-history-events", type=int, default=12)
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--oof-path", default="",
+                         help="If set, dump OOF npz (ids/y_true/classes/logits/probs) for this fold's "
+                              "validation split -- same schema as train_granite_router.py --oof-path. "
+                              "Lets you get OOF from an already-trained checkpoint without retraining.")
     args = parser.parse_args()
 
     model_dir = Path(args.model_dir)
-    texts, y = build_validation_data(args.data_dir, args.fold, args.n_splits, args.max_history_events)
+    ids, texts, y = build_validation_data(args.data_dir, args.fold, args.n_splits, args.max_history_events)
     print(f"validation_samples={len(texts)}")
-    logits = predict_logits(model_dir, texts, args.max_length, args.batch_size)
+    logits, id2label = predict_logits(model_dir, texts, args.max_length, args.batch_size)
+
+    if args.oof_path:
+        label2id = {id2label[i]: i for i in range(logits.shape[1])}
+        col_order = [label2id[name] for name in ACTION_CLASSES]
+        ordered = logits[:, col_order].astype(np.float32)
+        shifted = ordered - ordered.max(axis=1, keepdims=True)
+        exp = np.exp(shifted)
+        probs = (exp / exp.sum(axis=1, keepdims=True)).astype(np.float32)
+        Path(args.oof_path).parent.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            args.oof_path,
+            ids=np.array(ids, dtype=object),
+            y_true=np.asarray(y, dtype=np.int64),
+            classes=np.array(ACTION_CLASSES),
+            logits=ordered,
+            probs=probs,
+        )
+        print(f"saved OOF to {args.oof_path} shape={probs.shape}")
 
     base_preds = np.argmax(logits, axis=1)
     print(classification_report(y, base_preds, target_names=ACTION_CLASSES, digits=4, zero_division=0))
