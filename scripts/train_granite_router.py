@@ -58,7 +58,7 @@ def load_exclude_ids(path):
         return {line.strip() for line in f if line.strip()}
 
 
-def build_data(data_dir, max_history_events):
+def build_data(data_dir, max_history_events, include_open_file_names=False):
     samples = load_jsonl(Path(data_dir) / "train.jsonl")
     labels = load_labels(Path(data_dir) / "train_labels.csv")
     ids = []
@@ -68,7 +68,9 @@ def build_data(data_dir, max_history_events):
     for sample in samples:
         sample_id = sample["id"]
         ids.append(sample_id)
-        texts.append(render_granite_sample(sample, max_history_events=max_history_events))
+        texts.append(render_granite_sample(
+            sample, max_history_events=max_history_events, include_open_file_names=include_open_file_names,
+        ))
         y.append(LABEL2ID[labels[sample_id]])
         groups.append(session_group(sample_id))
     return (
@@ -155,6 +157,11 @@ def main():
                         "'id' column (e.g. find_label_issues.py --output) or a plain one-id-per-line file.")
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--max-history-events", type=int, default=12)
+    parser.add_argument("--include-open-file-names", action="store_true",
+                        help="Append an 'openfiles=<basenames>' field to [META] on top of the existing "
+                        "'open=<count>' field. This is the 'names' variant validated by the "
+                        "submit_names_single submission (granite-311m-v2-fold1 + logit bias). Must match "
+                        "at inference/tune_granite_bias time or predictions will be wrong.")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--eval-batch-size", type=int, default=64)
@@ -184,7 +191,7 @@ def main():
 
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ids, texts, y, groups = build_data(args.data_dir, args.max_history_events)
+    ids, texts, y, groups = build_data(args.data_dir, args.max_history_events, args.include_open_file_names)
 
     # ---- split ----
     if args.split_mode == "all":
@@ -326,6 +333,7 @@ def main():
                 "split_mode": args.split_mode,
                 "max_length": args.max_length,
                 "max_history_events": args.max_history_events,
+                "include_open_file_names": args.include_open_file_names,
                 "action_classes": ACTION_CLASSES,
             }
             if has_val:

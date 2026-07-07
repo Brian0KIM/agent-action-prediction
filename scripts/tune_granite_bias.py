@@ -25,7 +25,7 @@ def load_labels(path):
         return {row["id"]: row["action"] for row in csv.DictReader(f)}
 
 
-def build_validation_data(data_dir, fold, n_splits, max_history_events):
+def build_validation_data(data_dir, fold, n_splits, max_history_events, include_open_file_names=False):
     samples = load_jsonl(Path(data_dir) / "train.jsonl")
     labels = load_labels(Path(data_dir) / "train_labels.csv")
     ids = []
@@ -35,7 +35,9 @@ def build_validation_data(data_dir, fold, n_splits, max_history_events):
     for sample in samples:
         sample_id = sample["id"]
         ids.append(sample_id)
-        texts.append(render_granite_sample(sample, max_history_events=max_history_events))
+        texts.append(render_granite_sample(
+            sample, max_history_events=max_history_events, include_open_file_names=include_open_file_names,
+        ))
         y.append(LABEL2ID[labels[sample_id]])
         groups.append(session_group(sample_id))
 
@@ -133,6 +135,9 @@ def main():
     parser.add_argument("--n-splits", type=int, default=5)
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--max-history-events", type=int, default=12)
+    parser.add_argument("--include-open-file-names", action="store_true",
+                         help="Must match whatever the checkpoint in --model-dir was trained with "
+                              "(train_granite_router.py --include-open-file-names), or logits are meaningless.")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--oof-path", default="",
                          help="If set, dump OOF npz (ids/y_true/classes/logits/probs) for this fold's "
@@ -141,7 +146,9 @@ def main():
     args = parser.parse_args()
 
     model_dir = Path(args.model_dir)
-    ids, texts, y = build_validation_data(args.data_dir, args.fold, args.n_splits, args.max_history_events)
+    ids, texts, y = build_validation_data(
+        args.data_dir, args.fold, args.n_splits, args.max_history_events, args.include_open_file_names,
+    )
     print(f"validation_samples={len(texts)}")
     logits, id2label = predict_logits(model_dir, texts, args.max_length, args.batch_size)
 
