@@ -81,11 +81,22 @@ def render_sample(sample, max_history=8):
     return "\n".join(parts)
 
 
-def render_granite_sample(sample, max_history_events=12):
+def render_granite_sample(sample, max_history_events=12, include_open_file_names=False, open_file_names_limit=6):
     """Compact serialization used for the granite reproduction run.
 
     `max_history_events=12` corresponds to the last six user/action pairs in
     the released data format where history alternates user and assistant_action.
+
+    `include_open_file_names=False` keeps the original behavior (only the
+    `open=<count>` field) so already-trained checkpoints stay reproducible --
+    the render used at inference must match training exactly. Set it to True
+    to additionally append an `openfiles=<basename basename ...>` field (up to
+    `open_file_names_limit` files, directory stripped, extension kept). This
+    is the "names" variant validated in the `submit_names_single` submission
+    (single granite-311m-v2-fold1 + logit bias): it ADDS the basenames on top
+    of the existing count rather than replacing it, unlike the earlier
+    `open_files_mode=basename` experiment on sm-compression-adapters (which
+    replaced the count and scored lower, 0.74834/0.75064 vs 0.75337 baseline).
     """
     meta = sample.get("session_meta") or {}
     workspace = meta.get("workspace") or {}
@@ -112,6 +123,10 @@ def render_granite_sample(sample, max_history_events=12):
             f"loc={_safe_text(workspace.get('loc'))}",
         ]
     )
+
+    if include_open_file_names:
+        names = [f.split("/")[-1] for f in open_files[:open_file_names_limit]]
+        meta_text = meta_text + " openfiles=" + " ".join(names)
 
     hist_parts = []
     for item in recent_history:
