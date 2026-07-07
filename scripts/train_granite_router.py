@@ -150,8 +150,11 @@ def main():
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--warmup-ratio", type=float, default=0.06)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--fp16", action="store_true", default=True)
-    parser.add_argument("--save-fp16", action="store_true", default=True)
+    parser.add_argument("--fp16", action=argparse.BooleanOptionalAction, default=True)
+    # NOTE: pure fp16 (.half()) save overflows some weights to inf on this model and
+    # destroys the checkpoint. Default OFF; use --save-dtype bf16 for a safe compact save.
+    parser.add_argument("--save-fp16", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--save-dtype", choices=["fp32", "fp16", "bf16"], default="fp32")
     parser.add_argument("--attn-implementation", default="eager",
                         help="granite-embedding (ModernBert) needs 'eager'.")
     args = parser.parse_args()
@@ -314,10 +317,15 @@ def main():
             if has_val and args.oof_path and val_logits is not None:
                 dump_oof(args.oof_path, val_ids, val_gold, val_logits, model.config.id2label)
 
-    if args.save_fp16 and device.type == "cuda":
-        print("converting saved best model to fp16")
+    save_dtype = args.save_dtype
+    if args.save_fp16:
+        save_dtype = "fp16"  # backward-compat with the old flag
+    if save_dtype != "fp32" and device.type == "cuda":
+        print(f"re-saving best model as {save_dtype}")
         best_model = AutoModelForSequenceClassification.from_pretrained(args.output_dir)
-        best_model.half()
+        # bf16 keeps fp32's exponent range so weights never overflow to inf,
+        # unlike fp16 (.half()) which craters this model's accuracy.
+        best_model.to(torch.bfloat16 if save_dtype == "bf16" else torch.float16)
         best_model.save_pretrained(args.output_dir)
 
 
