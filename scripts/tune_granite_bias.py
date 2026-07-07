@@ -51,7 +51,11 @@ def predict_logits(model_dir, texts, max_length, batch_size):
     from transformers import AutoModelForSequenceClassification, AutoTokenizer, DataCollatorWithPadding
 
     tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
-    model = AutoModelForSequenceClassification.from_pretrained(model_dir, local_files_only=True)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        model_dir,
+        local_files_only=True,
+        torch_dtype=torch.float32,  # disk weights are fp16; upcast to fp32 for stable inference
+    )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()
@@ -77,8 +81,7 @@ def predict_logits(model_dir, texts, max_length, batch_size):
     with torch.no_grad():
         for batch in loader:
             batch = {k: v.to(device) for k, v in batch.items()}
-            with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
-                out = model(**batch).logits
+            out = model(**batch).logits
             logits.append(out.float().cpu().numpy())
     return np.concatenate(logits, axis=0)
 
