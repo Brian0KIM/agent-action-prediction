@@ -129,6 +129,11 @@ def main():
                         help="also send base samples whose top-2 logit margin <= this to the specialist")
     parser.add_argument("--blend-weights", default="0,0.25,0.5,0.75,1.0",
                         help="comma list of blend weights on specialist. 0=base, 1=hard override.")
+    parser.add_argument("--base-logit-bias", default="",
+                        help="path to a tune_granite_bias.py logit_bias.json for the base model. If set, "
+                        "added to base_logits BEFORE gating/base-macro so the cascade is evaluated against "
+                        "the same tuned predictions infer_granite_router.py actually submits (it auto-applies "
+                        "this file at inference). Without this, gating/base-macro use raw untuned logits.")
     args = parser.parse_args()
 
     print("=== eval_search_specialist v1 ===")
@@ -144,6 +149,17 @@ def main():
     ids = [str(i) for i in base["ids"]]
     y_true = base["y_true"].astype(np.int64)
     base_logits = base["logits"].astype(np.float32) if "logits" in base else np.log(base["probs"] + 1e-9)
+    npz_classes = list(base["classes"]) if "classes" in base else ACTION_CLASSES
+
+    if args.base_logit_bias:
+        with open(args.base_logit_bias, encoding="utf-8") as f:
+            bias_payload = json.load(f)
+        bias_by_label = bias_payload["bias"]
+        bias_vec = np.array([bias_by_label[label] for label in npz_classes], dtype=np.float32)
+        base_logits = base_logits + bias_vec[None, :]
+        print(f"applied --base-logit-bias {args.base_logit_bias} "
+              f"(reported tuned_macro_f1={bias_payload.get('tuned_macro_f1')}) to base_logits")
+
     base_pred = base_logits.argmax(1)
     base_macro, base_fs = macro_f1(y_true, base_pred)
     print(f"base: n={len(ids)}  macro-F1={base_macro:.4f}")
