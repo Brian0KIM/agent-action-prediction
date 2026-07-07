@@ -76,7 +76,9 @@ def main():
 
     model_dir = Path(args.model_dir)
     tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
-    model = AutoModelForSequenceClassification.from_pretrained(model_dir, local_files_only=True)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        model_dir, local_files_only=True, attn_implementation="eager"
+    )  # ModernBERT: eager must match training or accuracy craters to ~0.14
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()

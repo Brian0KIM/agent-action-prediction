@@ -84,6 +84,7 @@ def main():
         model_dir,
         local_files_only=True,
         trust_remote_code=args.trust_remote_code,
+        attn_implementation="eager",  # ModernBERT needs eager to match training; safe for other encoders too
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)

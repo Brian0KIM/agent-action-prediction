@@ -57,7 +57,9 @@ def predict_logits(model_dir, texts, max_length, batch_size):
     model = AutoModelForSequenceClassification.from_pretrained(
         model_dir,
         local_files_only=True,
-        torch_dtype=torch.float32,  # disk weights are fp16; upcast to fp32 for stable inference
+        attn_implementation="eager",  # ModernBERT: must match training; sdpa/flash mishandles
+                                      # padded-batch attention here and craters accuracy to ~0.14
+        torch_dtype=torch.float32,
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)

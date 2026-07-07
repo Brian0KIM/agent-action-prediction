@@ -150,6 +150,7 @@ def main():
         num_labels=len(ACTION_CLASSES),
         id2label=ID2LABEL,
         label2id=LABEL2ID,
+        attn_implementation="eager",  # ModernBERT: keep eager consistent train<->infer
     )
     lora_config = LoraConfig(
         task_type=TaskType.SEQ_CLS,

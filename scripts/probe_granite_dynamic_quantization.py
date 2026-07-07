@@ -117,7 +117,9 @@ def main():
     print(f"validation_samples={len(texts)} device=cpu")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True)
-    model = AutoModelForSequenceClassification.from_pretrained(args.model_dir, local_files_only=True)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        args.model_dir, local_files_only=True, attn_implementation="eager"
+    )  # ModernBERT: eager must match training or accuracy craters to ~0.14
     model.to("cpu")
     model.eval()
     bias = load_logit_bias(args.model_dir, model.config.id2label)
