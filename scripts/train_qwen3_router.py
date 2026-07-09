@@ -173,6 +173,10 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fp16", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-dtype", choices=["fp32", "fp16", "bf16"], default="fp32")
+    parser.add_argument("--gradient-checkpointing", action="store_true",
+                        help="Trade compute for memory: recompute activations in backward instead of "
+                        "storing them. Biggest single lever for OOM on a full-FT of a 0.6B decoder, "
+                        "especially with richargs' untruncated full-history sequences.")
     args = parser.parse_args()
 
     import torch
@@ -230,6 +234,9 @@ def main():
         ignore_mismatched_sizes=True,
     )
     model.config.pad_token_id = tokenizer.pad_token_id
+    if args.gradient_checkpointing:
+        model.gradient_checkpointing_enable()
+        model.config.use_cache = False  # incompatible with gradient checkpointing
     model.to(device)
 
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
