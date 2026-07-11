@@ -33,7 +33,6 @@ Example
 """
 import argparse
 import json
-import shutil
 import sys
 from collections import Counter
 from pathlib import Path
@@ -177,7 +176,11 @@ def main():
     print(f"quantized {n_quantized} tensors, kept {n_kept_fp} in fp16")
 
     save_file(out_sd, str(out_dir / "model_int8.safetensors"))
-    shutil.copy(model_dir / "config.json", out_dir / "config.json")
+    with open(model_dir / "config.json", encoding="utf-8") as f:
+        cfg_json = json.load(f)
+    cfg_json["vocab_size"] = len(kept)  # embedding was pruned to this many rows; must match or load_state_dict fails
+    with open(out_dir / "config.json", "w", encoding="utf-8") as f:
+        json.dump(cfg_json, f, indent=2)
     with open(out_dir / "serialize_variant.json", "w", encoding="utf-8") as f:
         json.dump({"variant": args.variant}, f)
 
