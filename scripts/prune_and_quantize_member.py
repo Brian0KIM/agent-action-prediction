@@ -126,8 +126,10 @@ def main():
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
-    model = AutoModelForSequenceClassification.from_pretrained(model_dir, local_files_only=True, torch_dtype=torch.float32)
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True, trust_remote_code=True)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        model_dir, local_files_only=True, torch_dtype=torch.float32, trust_remote_code=True,
+    )
     model.eval()
     sd = model.state_dict()
 
@@ -202,7 +204,9 @@ def main():
         else:
             dq_sd[k] = v.to(torch.float16) if v.is_floating_point() else v
 
-    dq_model = AutoModelForSequenceClassification.from_pretrained(model_dir, local_files_only=True, torch_dtype=torch.float16)
+    dq_model = AutoModelForSequenceClassification.from_pretrained(
+        model_dir, local_files_only=True, torch_dtype=torch.float16, trust_remote_code=True,
+    )
     # resize embedding to the pruned row count, then load
     dq_model.resize_token_embeddings(len(kept))
     missing, unexpected = dq_model.load_state_dict(dq_sd, strict=False)
