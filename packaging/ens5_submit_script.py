@@ -1,20 +1,28 @@
-"""DACON action-decision inference — ens5: submit_ens4_706's pipeline extended
-to support an arbitrary Nth granite-family member that does NOT share the
-existing vocab-pruning/remap.npy.
+"""DACON action-decision inference — 4-member ensemble: granite aum06, granite
+is3 (core, always run, shared tokenizer/remap) + gte-multilingual-base (core,
+always run, OWN tokenizer -- different backbone/vocab from granite) + qwen3
+(cascade-gated: skipped wherever the core members' margin already makes it
+unable to flip the argmax). Extends submit_ens4_706/script.py's pipeline to
+support a member from a THIRD backbone family, not just granite+qwen3.
 
-Difference from submit_ens4_706/script.py: `run_encoder_members` now checks
-for a PER-MEMBER `<mdir>/remap.npy` first, falling back to the shared
-`model/remap.npy` only if the member doesn't have its own, and skipping
-remap entirely (raw token ids) if NEITHER exists. This matters because a
-remap is only valid if the member's own embedding matrix was pruned to
-exactly that row subset -- applying the shared 3-granite remap to a member
-with a full, unpruned embedding table would silently corrupt its inputs.
+Family-aware loading (see main()): modernbert (granite) members batch-share
+`model/tokenizer/` + `run_encoder_members`; qwen3 keeps its own
+tokenizer/decoder-pooling path (`run_qwen_member`, unchanged from ens4); any
+OTHER family (gte's custom arch) gets its own tokenizer via
+`run_own_tokenizer_encoder_member` and is NEVER batched with granite -- a
+different vocab through the wrong tokenizer silently produces garbage.
+
+Per-member remap resolution (`resolve_remap`): a member's OWN `remap.npy` if
+present, else the shared `model/remap.npy` ONLY for members that don't pass
+`model_root=None` (own-tokenizer members always pass None -- the granite
+remap is meaningless for a different vocab), else no remap (raw token ids).
 
 New members ship with just: model_int8.safetensors, config.json,
-serialize_variant.json (from quantize_int8_member.py) -- and, if they use
-their own vocab pruning, their own remap.npy.
+serialize_variant.json (from prune_and_quantize_member.py) -- and, if
+vocab-pruned, their own remap.npy. A `gated` marker file in a member's folder
+opts it into the cascade instead of running unconditionally as core.
 
-Everything else (int8 dequant, qwen provably-safe margin gate, uniform mean,
+Everything else (int8 dequant, the provably-safe margin gate, uniform mean,
 raw argmax) is byte-for-byte submit_ens4_706/script.py.
 """
 import csv
@@ -127,8 +135,10 @@ def load_member(mdir, device):
 
 
 def resolve_remap(mdir, model_root, device):
-    """Per-member remap if present, else the shared one IF this member's dir
-    doesn't opt out, else None (no remap -- raw token ids)."""
+    """Per-member remap if present, else the shared one (only if model_root is
+    given -- own-tokenizer members like gte pass None, since the granite-shared
+    remap is meaningless for a different vocab) unless opted out, else None
+    (no remap -- raw token ids)."""
     import numpy as np
     import torch
 
@@ -136,11 +146,12 @@ def resolve_remap(mdir, model_root, device):
     if own.exists():
         print(f"  {Path(mdir).name}: using own remap.npy")
         return torch.from_numpy(np.load(own)).long().to(device)
-    shared = Path(model_root) / "remap.npy"
-    opt_out = Path(mdir) / "no_remap"
-    if shared.exists() and not opt_out.exists():
-        print(f"  {Path(mdir).name}: using shared model/remap.npy")
-        return torch.from_numpy(np.load(shared)).long().to(device)
+    if model_root is not None:
+        shared = Path(model_root) / "remap.npy"
+        opt_out = Path(mdir) / "no_remap"
+        if shared.exists() and not opt_out.exists():
+            print(f"  {Path(mdir).name}: using shared model/remap.npy")
+            return torch.from_numpy(np.load(shared)).long().to(device)
     print(f"  {Path(mdir).name}: no remap (raw token ids, full/unpruned embedding)")
     return None
 
@@ -194,6 +205,75 @@ def run_encoder_members(member_dirs, variants, samples, model_root, device, mean
         if device.type == "cuda":
             torch.cuda.empty_cache()
         print(f"member done: {mdir.name} ({v}) on {len(rows)}/{len(samples)} rows")
+
+
+def run_own_tokenizer_encoder_member(mdir, variant, samples, device, mean_probs, row_indices=None):
+    """A single encoder-family member that does NOT share granite's tokenizer
+    (e.g. gte-multilingual-base -- different backbone, different vocab).
+    Loads its own tokenizer from mdir (trust_remote_code for custom arch),
+    uses its own remap.npy if vocab-pruned (see resolve_remap), CLS-pooled
+    classification like the granite members but never batched with them."""
+    import numpy as np
+    import torch
+    from transformers import AutoTokenizer, DataCollatorWithPadding
+
+    rows = list(range(len(samples))) if row_indices is None else row_indices
+    if not rows:
+        print(f"member skipped entirely (0 rows remain undecided): {Path(mdir).name}")
+        return
+    row_samples = [samples[i] for i in rows]
+
+    tokenizer = AutoTokenizer.from_pretrained(mdir, local_files_only=True, trust_remote_code=True)
+    tokenizer.truncation_side = "right"
+    collator = DataCollatorWithPadding(tokenizer)
+
+    texts = [serialize_rich(s, VARIANT_STRIP[variant]) for s in row_samples]
+    enc = tokenizer(texts, truncation=True, max_length=MAX_LENGTH)
+    enc = [{"input_ids": enc["input_ids"][i], "attention_mask": enc["attention_mask"][i]}
+           for i in range(len(texts))]
+    order = sorted(range(len(enc)), key=lambda i: len(enc[i]["input_ids"]))
+
+    remap = resolve_remap(mdir, None, device)
+    from transformers import AutoConfig, AutoModelForSequenceClassification
+    from safetensors.torch import load_file
+    qpath = Path(mdir) / "model_int8.safetensors"
+    if qpath.exists():
+        cfg = AutoConfig.from_pretrained(mdir, local_files_only=True, trust_remote_code=True)
+        model = AutoModelForSequenceClassification.from_config(cfg, trust_remote_code=True).half().to(device)
+        sd_q = load_file(str(qpath), device=str(device))
+        sd = {}
+        for k, v in sd_q.items():
+            if k.endswith("__scale"):
+                continue
+            if v.dtype == torch.int8:
+                scale = sd_q[k + "__scale"].float()
+                sd[k] = (v.float() * scale.unsqueeze(-1)).to(torch.float16)
+            else:
+                sd[k] = v.to(torch.float16) if v.is_floating_point() else v
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        bad = [k for k in missing if "inv_freq" not in k and "position_ids" not in k]
+        assert not bad, f"missing weights after dequant load: {bad[:5]}"
+        assert not unexpected, f"unexpected keys: {unexpected[:5]}"
+        model.eval()
+    else:
+        model = AutoModelForSequenceClassification.from_pretrained(
+            mdir, local_files_only=True, torch_dtype=torch.float16, trust_remote_code=True,
+        ).to(device).eval()
+
+    with torch.no_grad():
+        for start in range(0, len(order), BATCH_SIZE):
+            loc = order[start:start + BATCH_SIZE]
+            batch = {k: t.to(device) for k, t in collator([enc[i] for i in loc]).items()}
+            if remap is not None:
+                batch["input_ids"] = remap[batch["input_ids"]]
+            logits = model(**batch).logits.float()
+            probs = torch.softmax(logits, -1).cpu().numpy()
+            global_idx = [rows[i] for i in loc]
+            mean_probs[global_idx] += probs
+    del model
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    print(f"member done: {Path(mdir).name} ({variant}, own-tokenizer) on {len(rows)}/{len(samples)} rows")
 
 
 def run_qwen_member(mdir, variant, samples, device, mean_probs, run_idx):
@@ -257,25 +337,40 @@ def main():
         v = json.load(open(mdir / "serialize_variant.json"))["variant"]
         assert v in VARIANT_STRIP, f"unknown variant {v}"
         variants[mdir] = v
-        families[mdir] = AutoConfig.from_pretrained(mdir, local_files_only=True).model_type
+        families[mdir] = AutoConfig.from_pretrained(
+            mdir, local_files_only=True, trust_remote_code=True
+        ).model_type
 
     samples = load_jsonl(data_dir / "test.jsonl")
     ids = [s["id"] for s in samples]
     mean_probs = np.zeros((len(samples), len(ALL_CLASSES)), dtype=np.float64)
 
     t0 = time.time()
-    granite_members = [m for m in member_dirs if families[m] != "qwen3"]
+    # Three families, three loading paths:
+    #   modernbert (granite: aum06, is3, ...) -- shares model/tokenizer + a
+    #     batched pass in run_encoder_members.
+    #   qwen3 -- own tokenizer, decoder pooling, always cascade-gated (see below).
+    #   anything else (gte-multilingual-base's "new"/custom model_type, or any
+    #     future cross-family member) -- own tokenizer via
+    #     run_own_tokenizer_encoder_member, NEVER batched with granite (wrong vocab).
+    modernbert_members = [m for m in member_dirs if families[m] == "modernbert"]
     qwen_members = [m for m in member_dirs if families[m] == "qwen3"]
-    # "core" granite members (no `gated` marker file) always run on every row,
-    # exactly like submit_ens4_706 -- this keeps the proven 3-granite base
-    # untouched. Any OTHER granite member carrying a `gated` marker file joins
-    # qwen in the cascaded margin-gate below instead of running unconditionally.
-    core_granite = [m for m in granite_members if not (m / "gated").exists()]
-    gated_granite = [m for m in granite_members if (m / "gated").exists()]
+    other_members = [m for m in member_dirs if m not in modernbert_members and m not in qwen_members]
 
-    if core_granite:
-        run_encoder_members(core_granite, variants, samples, model_root, device, mean_probs)
-    print(f"[t] core granite done at {time.time()-t0:.0f}s")
+    # "core" members (no `gated` marker file) always run on every row, exactly
+    # like submit_ens4_706 -- this keeps the proven granite base untouched.
+    # Any member carrying a `gated` marker file joins qwen in the cascaded
+    # margin-gate below instead of running unconditionally.
+    core_modernbert = [m for m in modernbert_members if not (m / "gated").exists()]
+    gated_modernbert = [m for m in modernbert_members if (m / "gated").exists()]
+    core_other = [m for m in other_members if not (m / "gated").exists()]
+    gated_other = [m for m in other_members if (m / "gated").exists()]
+
+    if core_modernbert:
+        run_encoder_members(core_modernbert, variants, samples, model_root, device, mean_probs)
+    for mdir in core_other:
+        run_own_tokenizer_encoder_member(mdir, variants[mdir], samples, device, mean_probs)
+    print(f"[t] core members done at {time.time()-t0:.0f}s")
 
     # Cascaded margin gate: with `remaining_count` probability-vector members
     # left to add (each entry in [0,1], row-sums to 1), a row's argmax is
@@ -286,7 +381,7 @@ def main():
     # single-qwen gate (remaining_count == 1, threshold 1.0) to any number of
     # remaining members, processed one at a time so the pool of "still
     # undecided" rows only shrinks.
-    remaining_pool = gated_granite + qwen_members
+    remaining_pool = gated_modernbert + gated_other + qwen_members
     undecided = list(range(len(samples)))
     for i, mdir in enumerate(remaining_pool):
         remaining_count = len(remaining_pool) - i
@@ -298,8 +393,10 @@ def main():
               f"(margin < {remaining_count}, {remaining_count} member(s) incl. this one remaining)")
         if families[mdir] == "qwen3":
             run_qwen_member(mdir, variants[mdir], samples, device, mean_probs, undecided)
-        else:
+        elif families[mdir] == "modernbert":
             run_encoder_members([mdir], variants, samples, model_root, device, mean_probs, row_indices=undecided)
+        else:
+            run_own_tokenizer_encoder_member(mdir, variants[mdir], samples, device, mean_probs, row_indices=undecided)
     print(f"[t] all members done at {time.time()-t0:.0f}s")
 
     mean_probs /= len(member_dirs)
