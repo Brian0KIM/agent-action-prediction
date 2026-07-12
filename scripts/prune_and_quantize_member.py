@@ -1,35 +1,38 @@
 """Vocab-prune + int8-quantize a granite-family checkpoint into a new
-ens4/ens5 member with its OWN remap.npy (does not touch the other members'
+ens5 member with its OWN remap.npy (does not touch the other members'
 shared tokenizer/remap.npy).
 
-Two things this member folder ends up with, matching ens4/ens5's
+Aligned with the real digital-competition pipeline (src/prune_vocab.py +
+experiments/ensemble/build_submission.py) after cross-checking against it:
+  - serialization is qwen_serialize.serialize() (== src/data.py's serialize(),
+    byte-verified earlier) with FULL history (max_hist=None), not
+    render_granite_sample's h12/h16-truncated format. A member must be
+    tokenized with whatever it was actually trained on.
+  - "kept" tokens = ids used when TRAIN.JSONL ONLY is rendered (real test.jsonl
+    is never available locally -- the team's actual methodology is train-only
+    coverage + a large margin as the safety net, not train+test).
+  - margin default 50,000 (their default), not a small number -- train-only
+    coverage is a much thinner signal than train+test, so the margin carries
+    more weight here.
+  - remap.npy saved as int32 (matches build_submission.py; also just smaller).
+
+Two things this member folder ends up with, matching ens5_submit_script.py's
 `load_member()` + `resolve_remap()` contract:
-  - model_int8.safetensors: same per-row-scale int8 format as
-    quantize_int8_member.py, but the token-embedding weight is first sliced
-    down to only the KEPT rows (pruned vocab), then quantized.
-  - remap.npy: int64 array of length == original vocab size. remap[i] = the
-    pruned row index for original token id i if i is kept, else the fallback
-    row's index. ens5_submit_script.py applies this to input_ids before the
-    forward pass, so the pruned embedding lines up.
+  - model_int8.safetensors: per-row-scale int8 (quantize_int8_member.py's
+    format), token-embedding first sliced to the KEPT rows, then quantized.
+  - remap.npy: int32 array of length == original vocab size, remap[i] = kept
+    row index for original id i, else the fallback row's index.
 
-"Kept" = every token id that appears when train.jsonl + test.jsonl are
-rendered with this member's own variant, plus tokenizer special tokens,
-plus (optionally, --margin > 0) the first --margin ids by raw vocab index --
-low ids are OFTEN, but not guaranteed, the more frequent subword pieces for a
-BPE tokenizer; this is a heuristic safety margin against a hidden-test token
-never seen in train/test, not a verified frequency ranking. Set --margin 0
-to rely purely on train+test coverage.
-
-Verifies round-trip like quantize_int8_member.py (argmax agreement + logit
-drift vs the original fp model), on a sample of train.jsonl.
+Verifies round-trip (argmax agreement + logit drift vs the original fp model)
+on a sample of train.jsonl.
 
 Example
 -------
     python scripts/prune_and_quantize_member.py \
-        --model-dir ./model/granite-311m-all-names-lr5e5 \
-        --output-dir ./model/member_4_all_lr5e5_pruned_int8 \
+        --model-dir ./model/gte-multilingual-base-full \
+        --output-dir ./model/member_gte_pruned_int8 \
         --variant richargs --data-dir ../data \
-        --include-open-file-names --margin 4096 --verify-samples 500
+        --margin 50000 --verify-samples 500
 """
 import argparse
 import json
@@ -42,7 +45,7 @@ import numpy as np
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
-from action_router.features import render_granite_sample  # noqa: E402
+from action_router.qwen_serialize import SERIALIZE_VARIANTS, serialize  # noqa: E402
 
 VARIANT_STRIP = {"richargs": True, "richmeta": False}
 
@@ -57,30 +60,20 @@ def dir_size_mb(path):
     return total / 1e6
 
 
-def render_for_pruning(sample, variant, max_history_events, include_open_file_names):
-    # This member's own render is render_granite_sample (richargs vs richmeta
-    # only affects the standalone qwen3/ens4 serialize_rich(), which this
-    # granite member does NOT use -- it uses render_granite_sample same as
-    # every other script in this repo). Kept as a parameter for clarity/
-    # forward-compat if this member ever switches renderers.
-    return render_granite_sample(sample, max_history_events=max_history_events,
-                                  include_open_file_names=include_open_file_names)
+def render_for_pruning(sample, variant):
+    return serialize(sample, max_hist=None, **SERIALIZE_VARIANTS[variant])
 
 
-def collect_used_token_ids(tokenizer, data_dir, variant, max_history_events, include_open_file_names, max_length):
+def collect_used_token_ids(tokenizer, data_dir, variant, max_length):
     used = Counter()
-    for fname in ["train.jsonl", "test.jsonl"]:
-        path = Path(data_dir) / fname
-        if not path.exists():
-            print(f"note: {path} not found, skipping")
-            continue
-        samples = load_jsonl(path)
-        texts = [render_for_pruning(s, variant, max_history_events, include_open_file_names) for s in samples]
-        for start in range(0, len(texts), 1024):
-            enc = tokenizer(texts[start:start + 1024], truncation=True, max_length=max_length, padding=False)
-            for ids in enc["input_ids"]:
-                used.update(ids)
-        print(f"{fname}: {len(samples)} samples tokenized, running unique token count = {len(used)}")
+    path = Path(data_dir) / "train.jsonl"
+    samples = load_jsonl(path)
+    texts = [render_for_pruning(s, variant) for s in samples]
+    for start in range(0, len(texts), 1024):
+        enc = tokenizer(texts[start:start + 1024], truncation=True, max_length=max_length, padding=False)
+        for ids in enc["input_ids"]:
+            used.update(ids)
+    print(f"train.jsonl: {len(samples)} samples tokenized, unique token count = {len(used)}")
     return used
 
 
@@ -93,7 +86,7 @@ def build_remap(vocab_size, used_counter, special_ids, margin, fallback_id):
         kept = sorted(set(kept) | {fallback_id})
     old_to_new = {old: new for new, old in enumerate(kept)}
     fallback_new = old_to_new[fallback_id]
-    remap = np.full(vocab_size, fallback_new, dtype=np.int64)
+    remap = np.full(vocab_size, fallback_new, dtype=np.int32)
     for old, new in old_to_new.items():
         remap[old] = new
     return remap, kept
@@ -112,11 +105,10 @@ def main():
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--variant", required=True, choices=["richargs", "richmeta"])
     parser.add_argument("--data-dir", default="../data")
-    parser.add_argument("--include-open-file-names", action="store_true")
-    parser.add_argument("--max-history-events", type=int, default=12)
     parser.add_argument("--max-length", type=int, default=512)
-    parser.add_argument("--margin", type=int, default=4096,
-                         help="Extra low-vocab-index ids to keep as a hidden-test safety margin. 0 to disable.")
+    parser.add_argument("--margin", type=int, default=50_000,
+                         help="Extra low-vocab-index ids to keep as a hidden-test safety margin "
+                              "(default matches digital-competition's build_submission.py). 0 to disable.")
     parser.add_argument("--min-quantize-numel", type=int, default=100_000,
                          help="Lowered from quantize_int8_member.py's 1e6 default -- catches the ~885k-element "
                               "Wo layers that default missed.")
@@ -152,8 +144,7 @@ def main():
         fallback_id = special_ids[0] if special_ids else 0
         print(f"note: tokenizer has no unk_token_id, using {fallback_id} as fallback")
 
-    used = collect_used_token_ids(tokenizer, args.data_dir, args.variant, args.max_history_events,
-                                   args.include_open_file_names, args.max_length)
+    used = collect_used_token_ids(tokenizer, args.data_dir, args.variant, args.max_length)
     remap, kept = build_remap(vocab_size, used, special_ids, args.margin, fallback_id)
     print(f"vocab {vocab_size} -> kept {len(kept)} rows "
           f"({100 * len(kept) / vocab_size:.1f}%), fallback_id={fallback_id}")
@@ -223,7 +214,7 @@ def main():
     remap_t = torch.from_numpy(remap).long().to(device)
 
     samples = load_jsonl(Path(args.data_dir) / "train.jsonl")[: args.verify_samples]
-    texts = [render_for_pruning(s, args.variant, args.max_history_events, args.include_open_file_names) for s in samples]
+    texts = [render_for_pruning(s, args.variant) for s in samples]
 
     fp_logits, dq_logits = [], []
     with torch.no_grad():
