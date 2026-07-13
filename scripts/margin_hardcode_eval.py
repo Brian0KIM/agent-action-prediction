@@ -100,6 +100,11 @@ def main():
     ap.add_argument("--focus-classes", default="",
                      help="comma list; if set, only rows whose GIVEN (y_true) label is in this "
                           "set count toward the reported macro-F1 delta (still fits priors on all rows)")
+    ap.add_argument("--force-class", default="",
+                     help="if set, SKIP the pair-prior fit entirely and just force every gated row's "
+                          "prediction to this one class (e.g. list_directory). No fitting means no "
+                          "leakage risk -- applied over the whole sample directly, not per-CV-fold, "
+                          "since there's nothing learned from the data to overfit.")
     args = ap.parse_args()
 
     data = np.load(args.npz, allow_pickle=True)
@@ -134,17 +139,24 @@ def main():
     baseline_preds = top1.copy()
     hardcoded_preds = top1.copy()
 
-    for k in range(args.cv_folds):
-        test_mask = fold_id == k
-        fit_mask = ~test_mask
-        fit_gated = fit_mask & gated
-        prior, pair_counts = fit_pair_prior(top1[fit_gated], top2[fit_gated], y[fit_gated], args.min_support)
+    if args.force_class:
+        force_idx = classes.index(args.force_class)
+        gated_idx = np.nonzero(gated)[0]
+        hardcoded_preds[gated_idx] = force_idx
+        print(f"forced {len(gated_idx)} gated rows to '{args.force_class}' (no fitting -- "
+              f"nothing learned from data, so no CV needed for this mode)")
+    else:
+        for k in range(args.cv_folds):
+            test_mask = fold_id == k
+            fit_mask = ~test_mask
+            fit_gated = fit_mask & gated
+            prior, pair_counts = fit_pair_prior(top1[fit_gated], top2[fit_gated], y[fit_gated], args.min_support)
 
-        test_gated_idx = np.nonzero(test_mask & gated)[0]
-        if len(test_gated_idx) == 0:
-            continue
-        overridden = apply_hardcode(top1[test_gated_idx], top2[test_gated_idx], prior, top1[test_gated_idx])
-        hardcoded_preds[test_gated_idx] = overridden
+            test_gated_idx = np.nonzero(test_mask & gated)[0]
+            if len(test_gated_idx) == 0:
+                continue
+            overridden = apply_hardcode(top1[test_gated_idx], top2[test_gated_idx], prior, top1[test_gated_idx])
+            hardcoded_preds[test_gated_idx] = overridden
 
     def report(preds, label):
         if focus:
@@ -157,7 +169,8 @@ def main():
         print(f"{label:>12s}  overall     macro-F1={f1_all:.4f}  acc={acc_all:.4f}  n={len(y)}")
         return f1_all
 
-    print("\n=== cross-validated (fit fold != test fold, no leakage) ===")
+    mode_label = "forced-class (no fitting, whole sample)" if args.force_class else "cross-validated (fit fold != test fold, no leakage)"
+    print(f"\n=== {mode_label} ===")
     f1_base = report(baseline_preds, "baseline")
     f1_hard = report(hardcoded_preds, "hardcoded")
     print(f"\ndelta macro-F1 (overall): {f1_hard - f1_base:+.4f}")
