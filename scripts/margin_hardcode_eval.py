@@ -47,9 +47,15 @@ def softmax(x):
     return e / e.sum(axis=1, keepdims=True)
 
 
-def macro_f1(y_true, y_pred, n_classes):
+def macro_f1(y_true, y_pred, n_classes=None, class_list=None):
+    """Average F1 over class_list if given, else over range(n_classes).
+    NOTE: when scoring a SUBSET of rows restricted to a few classes (e.g.
+    --focus-classes), you MUST pass class_list=those classes -- averaging
+    over all 14 with n_classes=14 silently zeroes out the 10 absent classes
+    (0 recall by construction) and craters the reported macro-F1."""
+    classes = class_list if class_list is not None else range(n_classes)
     scores = []
-    for c in range(n_classes):
+    for c in classes:
         tp = np.sum((y_pred == c) & (y_true == c))
         fp = np.sum((y_pred == c) & (y_true != c))
         fn = np.sum((y_pred != c) & (y_true == c))
@@ -143,10 +149,10 @@ def main():
     def report(preds, label):
         if focus:
             keep = np.isin(y, list(focus_idx))
-            f1 = macro_f1(y[keep], preds[keep], nc)
+            f1 = macro_f1(y[keep], preds[keep], class_list=sorted(focus_idx))
             acc = (preds[keep] == y[keep]).mean()
             print(f"{label:>12s}  focus-class macro-F1={f1:.4f}  acc={acc:.4f}  n={keep.sum()}")
-        f1_all = macro_f1(y, preds, nc)
+        f1_all = macro_f1(y, preds, n_classes=nc)
         acc_all = (preds == y).mean()
         print(f"{label:>12s}  overall     macro-F1={f1_all:.4f}  acc={acc_all:.4f}  n={len(y)}")
         return f1_all
